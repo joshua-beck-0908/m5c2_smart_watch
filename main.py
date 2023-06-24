@@ -33,6 +33,7 @@ class PowerController:
         'vc13control': 0x12,
         'chipVcc': 0x26,
         'display': 0x27,
+        'ldoVcc': 0x28,
         'power': 0x30,
         'voffVoltage': 0x31,
         'control': 0x32,
@@ -126,6 +127,26 @@ class PowerController:
     
     def overheated(self):
         return self.read(self.register['status'], 8) & 0x80 == 0x80
+    
+    def enabledPeripherals(self, enable):
+        self.setRegBit(self.register['vc13control'], 0x04, enable)
+        
+    def enableVibrator(self, enable):
+        self.setRegBit(self.register['vc13control'], 0x08, enable)
+        
+    def setPeripheralVoltage(self, voltage):
+        if voltage < 1.8 or voltage > 3.3:
+            raise ValueError("Voltage must be between 1.8 and 3.3")
+        step = (voltage - 1.8) / 0.1
+        reg = self.read(self.register['ldoVcc'], 8) & 0x0F
+        self.write(self.register['ldoVcc'], int(step) << 4 | reg)
+        
+    def setVibratorVoltage(self, voltage):
+        if voltage < 1.8 or voltage > 3.3:
+            raise ValueError("Voltage must be between 1.8 and 3.3")
+        step = (voltage - 1.8) / 0.1
+        reg = self.read(self.register['ldoVcc'], 8) & 0xF0
+        self.write(self.register['ldoVcc'], int(step) | reg)
 
     def preSleep(self):
         self.enableAdc(False)
@@ -163,6 +184,40 @@ class PowerController:
         else:
             return 0
     
+# Vibration motor control class
+# Runs through a sequence in the background.
+# Sequences take the format: [[power, duration], [power, duration], ...]
+# A power of 0 means off.
+class Vibrator:
+    sequence = []
+    seqStep = 0
+    stepEndTime = 0
+    seqRunning = False
+
+    def __init__(self, pwrCtrl):
+        self.pwrCtrl = pwrCtrl
+
+    def runSequence(self, sequence):
+        self.sequence = sequence
+        self.pwrCtrl.enableVibrator(True)
+        self.nextStep()
+        
+    def update(self):
+        if not self.seqRunning:
+            return
+        if time.monotonic() > self.stepEndTime:
+            self.nextStep()
+
+    def nextStep(self):
+        if self.seqStep >= len(self.sequence):
+            self.pwrCtrl.enableVibrator(False)
+            self.seqRunning = False
+            return
+        self.pwrCtrl.setVibratorVoltage(self.sequence[self.seqStep][0])
+        self.stepEndTime = time.monotonic() + self.sequence[self.seqStep][1]
+        self.seqStep += 1
+        self.seqRunning = True
+
 class MotionSensor:
     # The M5Stack Core2 has a built-in accelerometer and gyroscope.
     # It uses a MPU6886.
@@ -400,9 +455,9 @@ class MotionSensor:
     def setAccelIntelligence(self, womDetect=False, intelligentMode=False, outputLimit=True, womMode=WOM_OR):
         self.write(self.reg['ACCEL_INTEL_CTRL'], bytearray([womDetect << 7 | intelligentMode << 6 | (not outputLimit) << 1 | womMode]))
 
-    def wakeOnMotion(self, threshold, duration, x=False, y=False, z=False):
+    def wakeOnMotion(self, threshold, x=False, y=False, z=False):
         self.setPowerMode(sleep=False, cycle=False, tempDisable=False, gyroStandby=False, clockSelect=self.CLOCK_AUTO)
-        self.setAccelStandby(['XA': False, 'YA': False, 'ZA': False, 'XG': True, 'YG': True, 'ZG': True])
+        self.setAccelStandby({'XA': False, 'YA': False, 'ZA': False, 'XG': True, 'YG': True, 'ZG': True})
         self.setAccelConfig(self.ACCEL_RANGE_8G, self.SAMPLES_8PERSEC, self.ACCEL_BANDWIDTH_218HZ)
         self.configureInterrupts([self.INTERRUPT_X_AXIS, self.INTERRUPT_Y_AXIS, self.INTERRUPT_Z_AXIS])
         self.setWakeOnMotionThreshold(x=32, y=32, z=32)
@@ -501,19 +556,31 @@ def main():
     ts = TouchScreen(pwr)
     rtc = RTC()
     t = rtc.getTime()
-    mc = MotionSensor()
+    #mc = MotionSensor()
+    
+    for i in range(15):
+        pwr.setVibratorVoltage(1.8 + i / 10)
+        pwr.enableVibrator(True)
+        time.sleep(0.3)
+        pwr.enableVibrator(False)
+        time.sleep(0.2)
+
     
     font = terminalio.FONT
     clockLabel = Label(terminalio.FONT, text=getTime(rtc), color=0xFFFFFF, scale=5, anchor_point=(0.5, 0.5), anchored_position=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
+    accelLabel = Label(terminalio.FONT, text='Accel', color=0xFFFFFF, scale=2, anchor_point=(0.5, 0.5), anchored_position=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50))
     #clockLabel.x = SCREEN_WIDTH // 2 - clockLabel.bounding_box[2] // 2
     #clockLabel.y = SCREEN_HEIGHT // 2 - clockLabel.bounding_box[3] // 2
     ts.add(clockLabel)
+    ts.add(accelLabel)
     while True:
         activeStart = time.monotonic()
         while time.monotonic() - activeStart < 5.0:
             t = rtc.getTime()
             clockLabel.text = getTime(rtc)
-            time.sleep(0.2)
+            #accelLabel.text = str(mc.getAccel())
+            time.sleep(0.05)
+        #mc.wakeOnMotion(32, x=True, y=True, z=True)
         ts.sleepUntilTouch()
     
 
