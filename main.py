@@ -557,15 +557,10 @@ def main():
     rtc = RTC()
     t = rtc.getTime()
     #mc = MotionSensor()
-    
-    for i in range(15):
-        pwr.setVibratorVoltage(1.8 + i / 10)
-        pwr.enableVibrator(True)
-        time.sleep(0.3)
-        pwr.enableVibrator(False)
-        time.sleep(0.2)
 
     
+    pwr.setVibratorVoltage(3.2)
+    pwr.enableVibrator(False)
     font = terminalio.FONT
     clockLabel = Label(terminalio.FONT, text=getTime(rtc), color=0xFFFFFF, scale=5, anchor_point=(0.5, 0.5), anchored_position=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
     accelLabel = Label(terminalio.FONT, text='Accel', color=0xFFFFFF, scale=2, anchor_point=(0.5, 0.5), anchored_position=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50))
@@ -582,6 +577,9 @@ def main():
             time.sleep(0.05)
         #mc.wakeOnMotion(32, x=True, y=True, z=True)
         ts.sleepUntilTouch()
+        pwr.enableVibrator(True)
+        time.sleep(0.1)
+        pwr.enableVibrator(False)
     
 
 if __name__ == "__main__":
