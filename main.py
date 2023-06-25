@@ -38,9 +38,13 @@ class PowerController:
         'voffVoltage': 0x31,
         'control': 0x32,
         'chargeControl': 0x33,
+        'rtcChargeControl': 0x35,
+        'buttonParameters': 0x36,
         'dcSettings': 0x80,
         'adcEnable1': 0x82,
         'adcEnable2': 0x83,
+        'gpio0': 0x90,
+        'gpio0ld0': 0x91,
         'gpio1': 0x92,
         'gpio2': 0x93,
         'signalStatus012': 0x94,
@@ -54,7 +58,36 @@ class PowerController:
     minDisplayVoltage = 2.7
     maxDisplayVoltage = 3.4
     buffer = bytearray(4)
+    adcItems = {
+        'batteryVoltage': 0x80,
+        'batteryCurrent': 0x40,
+        'acVoltage': 0x20,
+        'acCurrent': 0x10,
+        'vbusVoltage': 0x08,
+        'vbusCurrent': 0x04,
+        'apsVoltage': 0x02,
+        'tsPinCurrent': 0x01
+    }
     
+    def __init__(self):
+        self.configPowerBus(enableBoost=False, vbusLimit=None, inputCurrentLimit=None)
+        self.initGpio()
+        self.setRtcCharge(True, 3.0, 200)
+        self.setMcuVoltage(3.35)
+        self.setDisplayVoltage(2.8)
+        self.setPeripheralVoltage(2.8)
+        self.setVibratorVoltage(2)
+        self.enableSpeaker(True)
+        self.enablePeripherals(True)
+        self.enableLcd(True)
+        self.enableLed(True)
+        self.setChargeCurrent(700)
+        self.setButtonParameters(startupTime=1, longPressTime=1, shutdownTime=8, keepOnForPress=False, longerPwrOkWait=True)
+        self.setAdcFeatures(['batteryVoltage', 'batteryCurrent', 'vbusVoltage', 'vbusCurrent', 'acVoltage', 'acCurrent', 'tsPinCurrent', 'apsVoltage'])
+        self.lcdReset()
+        if self.vbusAvailable():
+            self.enableVbus(True)
+
     def setDisplayVoltage(self, voltage):
         if voltage < self.minDisplayVoltage or voltage > self.maxDisplayVoltage:
             raise ValueError("Voltage must be between 2.7 and 3.4")
@@ -70,6 +103,57 @@ class PowerController:
             raise ValueError("Voltage must be greater than 0.7")
         value = int((voltage - self.converterMin) / self.converterStep)
         self.write(reg, value)
+        
+    def setButtonParameters(self, startupTime, longPressTime, shutdownTime, keepOnForPress=True, longerPwrOkWait=False):
+        try:
+            startupTime = [0.128, 0.512, 1, 2].index(startupTime)
+        except ValueError:
+            raise ValueError("Invalid startup time")
+        try:
+            longPressTime = [1, 1.5, 2, 2.5].index(longPressTime)
+        except ValueError:
+            raise ValueError("Invalid long press time")
+        try:
+            shutdownTime = [4, 6, 8, 10].index(shutdownTime)
+        except ValueError:
+            raise ValueError("Invalid shutdown time")
+
+        reg = startupTime << 6 | longPressTime << 4 | shutdownTime | (not keepOnForPress) << 3 | longerPwrOkWait << 2
+        self.write(self.register['buttonParameters'], reg)
+
+    def lcdReset(self):
+        self.setRegBit(self.register['signalStatus34'], 0x02, True)
+        time.sleep(0.1)
+        self.setRegBit(self.register['signalStatus34'], 0x02, False)
+        time.sleep(0.1)
+
+    def setAdcFeatures(self, features):
+        reg = 0
+        for feature in features:
+            try:
+                reg |= self.adcItems[feature]
+            except KeyError:
+                raise ValueError("Invalid ADC feature")
+        self.write(self.register['adcEnable1'], reg)
+
+    ##
+    # @brief Set the RTC Charge Rate
+    # @param charge: True or False, whether to enable RTC charge
+    # @param voltage: Max charging voltage in volts, possible values are: 3.1, 3.0 or 2.5
+    # @param chargeCurrent: Max RTC charging current (in uA) possible values are: 50, 100, 200 or 400
+    def setRtcCharge(self, charge, voltage, chargeCurrent):
+        reg = self.read(self.register['rtcChargeControl'], 8) & 0x1C
+        if charge:
+            reg |= 0x80
+            try:
+                voltage = [3.1, 3.0, 3.0, 2.5].index(voltage)
+            except ValueError:
+                raise ValueError("Invalid RTC charge voltage")
+            try:
+                chargeCurrent = [50, 100, 200, 400].index(chargeCurrent)
+            except ValueError:
+                raise ValueError("Invalid RTC charge current")
+                
 
     def isCharging(self):
         return self.read(self.register['power'], 8) & 0x80 == 0x80
@@ -84,6 +168,28 @@ class PowerController:
             self.write(self.register['adcEnable1'], 0xFF)
         else:
             self.write(self.register['adcEnable1'], 0x00)
+            
+    def setGpio0Ld0Voltage(self, voltage):
+        if voltage < 1.8 or voltage > 3.3:
+            raise ValueError("Voltage must be between 1.8 and 3.3")
+        # Set LD0 voltage. Uses 0.1V steps starting at 1.8V.
+        value = int((voltage - 1.8) / 0.1)
+        g0ld0 = self.read(self.register['gpio0ld0'], 8) & 0x0F
+        self.write(self.register['gpio0ld0'], g0ld0 | value << 4)
+
+    def enableVbus(self, enable):
+        if enable:
+            self.setGpio0Ld0Voltage(3.3)
+            # Enable LD0 output.
+            gpio0 = self.read(self.register['gpio0'], 8) & 0xF8
+            self.write(self.register['gpio0'], gpio0 | 0x02)
+            self.enableExternalPower(True)
+        else:
+            self.enableExternalPower(False)
+            # Disable LD0 output.
+            gpio0 = self.read(self.register['gpio0'], 8) & 0xF8
+            self.write(self.register['gpio0'], gpio0 | 0x07)
+            
 
     def setRegBit(self, reg, bit, value):
         regValue = self.read(reg, 8)
@@ -94,17 +200,53 @@ class PowerController:
         self.write(reg, regValue)
 
     def enableLed(self, enable):
-        self.setRegBit(self.register['signalStatus012'], 0x04, not enable)
+        self.setRegBit(self.register['signalStatus012'], 0x02, not enable)
             
-    def enableSpeaker(self, enable):
-        self.setRegBit(self.register['signalStatus012'], 0x02, enable)
+    def initGpio(self):
+        gpio1 = self.read(self.register['gpio1'], 8) & 0xf8
+        gpio2 = self.read(self.register['gpio2'], 8) & 0xf8
+        self.write(self.register['gpio1'], gpio1)
+        self.write(self.register['gpio2'], gpio2)
+        #gpio34 = self.read(self.register['functionCtrl34'], 8) & 0x72
+        #self.write(self.register['functionCtrl34'], gpio34 | 0x84)
+
+    def configPowerBus(self, enableBoost=False, vbusLimit=None, inputCurrentLimit=None):
+        control = self.read(self.register['power'], 8) & 0x04
+        if inputCurrentLimit == None:
+            control |= 0x02
+        elif inputCurrentLimit == 0.1:
+            control |= 0x01
+        elif inputCurrentLimit == 0.5:
+            control |= 0x00
+        else:
+            raise ValueError("Invalid input current limit")
         
-    def enablePeripheral(self, enable):
+        if vbusLimit == None:
+            control |= 0x00
+        elif vbusLimit < 4.0 or vbusLimit > 4.7:
+            raise ValueError("Vbus limit must be between 4.0 and 4.7")
+        else:
+            vbusLimit = int((vbusLimit - 4.0) / 0.1) | 0x08
+            control |= vbusLimit << 3
+        
+        if enableBoost:
+            control |= 0x80
+
+    def enableSpeaker(self, enable):
+        self.setRegBit(self.register['signalStatus012'], 0x04, enable)
+        
+    def enablePeripherals(self, enable):
         self.setRegBit(self.register['vc2control'], 0x04, enable)
         
     def enableLcd(self, enable):
         self.setRegBit(self.register['vc13control'], 0x02, enable)
+        
+    def enableExternalPower(self, enable):
+        self.setRegBit(self.register['vc2control'], 0x04, enable)
 
+    ##
+    # @brief Set the charge current for the main battery.
+    # @param milliamps: The charge current in milliamps (from 100 to 700)
     def setChargeCurrent(self, milliamps):
         # There are 8 options for charge current.
         # Round to the nearest option.
@@ -152,6 +294,7 @@ class PowerController:
         self.enableAdc(False)
         self.enableLed(False)
         self.enableLcd(False)
+        self.enableSpeaker(False)
 
         
     def postSleep(self):
@@ -570,12 +713,14 @@ def main():
     ts.add(accelLabel)
     while True:
         activeStart = time.monotonic()
+        pwr.enableLed(True)
         while time.monotonic() - activeStart < 5.0:
             t = rtc.getTime()
             clockLabel.text = getTime(rtc)
             #accelLabel.text = str(mc.getAccel())
             time.sleep(0.05)
         #mc.wakeOnMotion(32, x=True, y=True, z=True)
+        pwr.enableLed(False)
         ts.sleepUntilTouch()
         pwr.enableVibrator(True)
         time.sleep(0.1)
